@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: fududeeeye-online
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_USER
+        value: admin
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: PAYMENT_WEBHOOK_SECRET
+        generateValue: true
