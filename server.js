@@ -15,12 +15,46 @@ app.use((req,res,next)=>{
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '1mb' }));
+// Allow the mobile/browser frontend to call the Render API even when the
+// HTML is opened from a content:// or file:// URI. Authenticated endpoints
+// still require the normal Bearer token.
+app.use((req,res,next)=>{
+  res.setHeader('Access-Control-Allow-Origin','*');
+  res.setHeader('Access-Control-Allow-Headers','Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Methods','GET,POST,PATCH,DELETE,OPTIONS');
+  if(req.method==='OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+// Small in-process rate limiter for authentication and webhook endpoints.
+// This protects a single Render instance; use a shared gateway/Redis for multi-instance scaling.
+const rateBuckets = new Map();
+function rateLimit({windowMs=15*60*1000,max=60}={}) {
+  return (req,res,next)=>{
+    const key = req.ip + ':' + req.path;
+    const now = Date.now();
+    let b = rateBuckets.get(key);
+    if (!b || now >= b.reset) b = {count:0, reset:now+windowMs};
+    b.count++; rateBuckets.set(key,b);
+    if (b.count > max) {
+      res.setHeader('Retry-After', Math.ceil((b.reset-now)/1000));
+      return res.status(429).json({error:'Codsiyo badan ayaa la diray. Fadlan wax yar sug.'});
+    }
+    next();
+  };
+}
+setInterval(()=>{ const now=Date.now(); for(const [k,b] of rateBuckets) if(now>=b.reset) rateBuckets.delete(k); }, 10*60*1000).unref();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_IN_PRODUCTION';
 const ADMIN_USER = process.env.ADMIN_USER || 'admin';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'CHANGE_ME';
 const PAYMENT_WEBHOOK_SECRET = process.env.PAYMENT_WEBHOOK_SECRET || 'CHANGE_ME_PAYMENT_WEBHOOK';
+const IS_PRODUCTION = process.env.NODE_ENV === 'production' || process.env.RENDER === 'true';
+if (IS_PRODUCTION && (JWT_SECRET === 'CHANGE_ME_IN_PRODUCTION' || ADMIN_PASSWORD === 'CHANGE_ME' || PAYMENT_WEBHOOK_SECRET === 'CHANGE_ME_PAYMENT_WEBHOOK')) {
+  throw new Error('Production configuration missing: set JWT_SECRET, ADMIN_PASSWORD and PAYMENT_WEBHOOK_SECRET.');
+}
+app.set('trust proxy', 1);
 
 const dataDir = path.join(__dirname, 'data');
 fs.mkdirSync(dataDir, { recursive: true });
@@ -29,6 +63,12 @@ db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
 try { db.exec("ALTER TABLE stores ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'"); } catch (_) {}
+for (const stmt of [
+  "ALTER TABLE stores ADD COLUMN approval_requested_at TEXT",
+  "ALTER TABLE stores ADD COLUMN approval_deadline TEXT",
+  "ALTER TABLE stores ADD COLUMN approval_decided_at TEXT",
+  "ALTER TABLE stores ADD COLUMN rejection_reason TEXT"
+]) { try { db.exec(stmt); } catch (_) {} }
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -60,6 +100,10 @@ CREATE TABLE IF NOT EXISTS stores (
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   approval_status TEXT NOT NULL DEFAULT 'approved',
+  approval_requested_at TEXT,
+  approval_deadline TEXT,
+  approval_decided_at TEXT,
+  rejection_reason TEXT,
   FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS categories (
@@ -168,20 +212,28 @@ function auth(req,res,next){
 function requireRole(...roles){ return (req,res,next)=>roles.includes(req.user.role) ? next() : res.status(403).json({error:'Uma lihid oggolaanshahan.'}); }
 function audit(actor,action,type,id,details){ db.prepare('INSERT INTO audit_logs(actor_user_id,action,target_type,target_id,details) VALUES(?,?,?,?,?)').run(actor||null,action,type||null,id||null,details?JSON.stringify(details):null); }
 function orderNo(){ return 'FO-' + new Date().toISOString().slice(0,10).replace(/-/g,'') + '-' + crypto.randomBytes(3).toString('hex').toUpperCase(); }
+function expirePendingSellerApprovals(){
+  const now=new Date().toISOString();
+  db.prepare("UPDATE stores SET approval_status='expired',active=0,approval_decided_at=CURRENT_TIMESTAMP WHERE approval_status='pending' AND approval_deadline IS NOT NULL AND approval_deadline<=?").run(now);
+  db.prepare("UPDATE users SET active=0,updated_at=CURRENT_TIMESTAMP WHERE role='seller' AND id IN (SELECT seller_id FROM stores WHERE approval_status='expired')").run();
+}
+expirePendingSellerApprovals();
+setInterval(expirePendingSellerApprovals,60*1000).unref();
 
-app.post('/api/login',(req,res)=>{
+app.post('/api/login',rateLimit({windowMs:15*60*1000,max:20}),(req,res)=>{
   const p=normalizePhone(req.body?.phone); const password=String(req.body?.password||'');
   const u=db.prepare('SELECT * FROM users WHERE phone=?').get(p || req.body?.phone);
   if(!u || !bcrypt.compareSync(password,u.password_hash)) return res.status(401).json({error:'Lambarka ama furaha sirta ah waa khalad.'});
   const store=u.role==='seller' ? db.prepare('SELECT * FROM stores WHERE seller_id=?').get(u.id) : null;
   if(u.role==='seller' && store?.approval_status==='pending') return res.status(403).json({error:'Codsiga bakhaarkaaga wali waa la sugayaa. Fadlan sug inta Admin-ku ansixinayo.'});
   if(u.role==='seller' && store?.approval_status==='rejected') return res.status(403).json({error:'Codsiga bakhaarkaaga waa la diiday. Fadlan la xiriir Maamulka.'});
+  if(u.role==='seller' && store?.approval_status==='expired') return res.status(403).json({error:'Codsiga bakhaarkaaga 24-ka saac wuu ka dhacay. Fadlan la xiriir Maamulka.'});
   if(!u.active) return res.status(401).json({error:'Account-kan hadda ma shaqaynayo.'});
   const safe={id:u.id,name:u.name,phone:u.phone,role:u.role,city:u.city||'',neighborhood:u.neighborhood||'',dob:u.dob||'',gender:u.gender||'',lat:u.lat,lng:u.lng,store};
   res.json({token:sign(u),user:safe});
 });
 
-app.post('/api/register/customer',(req,res)=>{
+app.post('/api/register/customer',rateLimit({windowMs:60*60*1000,max:10}),(req,res)=>{
   const {name,phone,password,dob,gender,city,neighborhood,lat,lng}=req.body||{}; const p=normalizePhone(phone);
   if(!name||name.trim().length<2 || p.length!==9 || !password || password.length<6 || !city || !neighborhood) return res.status(400).json({error:'Fadlan buuxi magaca, lambarka, password-ka, magaalada iyo xaafadda.'});
   if(db.prepare('SELECT id FROM users WHERE phone=?').get(p)) return res.status(409).json({error:'Lambarkan hore ayaa account loogu sameeyay.'});
@@ -206,14 +258,15 @@ app.get('/api/me',auth,(req,res)=>{
   res.json({user:{...u,store}});
 });
 
-app.post('/api/register/seller',(req,res)=>{
+app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res)=>{
   const {name,phone,password,storeName,city,neighborhood,address,lat,lng}=req.body||{}; const p=normalizePhone(phone);
   if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood) return res.status(400).json({error:'Fadlan buuxi xogta iibiyaha iyo bakhaarka.'});
   if(db.prepare('SELECT id FROM users WHERE phone=?').get(p)) return res.status(409).json({error:'Lambarkan hore ayaa account loogu sameeyay.'});
   const tx=db.transaction(()=>{
     const hash=bcrypt.hashSync(password,12);
     const u=db.prepare("INSERT INTO users(name,phone,password_hash,role,city,neighborhood,lat,lng,active) VALUES(?,?,?,?,?,?,?,?,0)").run(name.trim(),p,hash,'seller',city,neighborhood,lat||null,lng||null);
-    const st=db.prepare("INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status) VALUES(?,?,?,?,?,?,?,?,0,'pending')").run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null);
+    const requestedAt=new Date(); const deadline=new Date(requestedAt.getTime()+24*60*60*1000).toISOString();
+    const st=db.prepare("INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status,approval_requested_at,approval_deadline) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?)").run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null,requestedAt.toISOString(),deadline);
     return {userId:u.lastInsertRowid,storeId:st.lastInsertRowid};
   });
   const out=tx(); audit(null,'seller_application','store',out.storeId,{userId:out.userId,status:'pending'});
@@ -227,7 +280,7 @@ app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
   const tx=db.transaction(()=>{
     const hash=bcrypt.hashSync(password,12);
     const u=db.prepare('INSERT INTO users(name,phone,password_hash,role,city,neighborhood,lat,lng) VALUES(?,?,?,?,?,?,?,?)').run(name.trim(),p,hash,'seller',city,neighborhood,lat||null,lng||null);
-    const s=db.prepare('INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng) VALUES(?,?,?,?,?,?,?,?)').run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null);
+    const s=db.prepare("INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status,approval_decided_at) VALUES(?,?,?,?,?,?,?, ?,1,'approved',CURRENT_TIMESTAMP)").run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null);
     return {userId:u.lastInsertRowid,storeId:s.lastInsertRowid};
   });
   const out=tx(); audit(req.user.id,'create','seller',out.userId,{storeId:out.storeId}); res.json(out);
@@ -235,23 +288,23 @@ app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
 
 app.get('/api/admin/customers',auth,requireRole('admin'),(req,res)=>{ const rows=db.prepare("SELECT id,name,phone,city,neighborhood,active,created_at FROM users WHERE role='customer' ORDER BY id DESC").all(); res.json({customers:rows}); });
 app.get('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
-  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng,s.approval_status
+  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng,s.approval_status,s.approval_requested_at,s.approval_deadline,s.approval_decided_at,s.rejection_reason
     FROM users u LEFT JOIN stores s ON s.seller_id=u.id WHERE u.role='seller' ORDER BY u.id DESC`).all(); res.json({sellers:rows});
 });
 app.patch('/api/admin/sellers/:id/approval',auth,requireRole('admin'),(req,res)=>{
-  const id=Number(req.params.id); const status=String(req.body.status||'');
+  const id=Number(req.params.id); const status=String(req.body.status||''); const reason=String(req.body.reason||'').trim();
   if(!['approved','rejected','pending'].includes(status)) return res.status(400).json({error:'Xaalad ansixin aan sax ahayn.'});
   const seller=db.prepare("SELECT u.id,s.id store_id FROM users u JOIN stores s ON s.seller_id=u.id WHERE u.id=? AND u.role='seller'").get(id);
   if(!seller) return res.status(404).json({error:'Iibiyaha lama helin.'});
   const active=status==='approved'?1:0;
   const tx=db.transaction(()=>{
     db.prepare('UPDATE users SET active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(active,id);
-    db.prepare('UPDATE stores SET active=?,approval_status=? WHERE seller_id=?').run(active,status,id);
-  }); tx(); audit(req.user.id,'seller_approval','store',seller.store_id,{status});
+    db.prepare("UPDATE stores SET active=?,approval_status=?,approval_decided_at=CASE WHEN ? IN ('approved','rejected') THEN CURRENT_TIMESTAMP ELSE NULL END,rejection_reason=CASE WHEN ?='rejected' THEN ? ELSE NULL END WHERE seller_id=?").run(active,status,status,status,reason||'Codsiga lama ansixin.',id);
+  }); tx(); audit(req.user.id,'seller_approval','store',seller.store_id,{status,reason});
   res.json({ok:true,status});
 });
 
-app.patch('/api/admin/users/:id/active',auth,requireRole('admin'),(req,res)=>{ const id=Number(req.params.id); db.prepare('UPDATE users SET active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(req.body.active?1:0,id); audit(req.user.id,'set_active','user',id,{active:!!req.body.active}); res.json({ok:true}); });
+app.patch('/api/admin/users/:id/active',auth,requireRole('admin'),(req,res)=>{ const id=Number(req.params.id); const active=req.body.active?1:0; const tx=db.transaction(()=>{ db.prepare('UPDATE users SET active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(active,id); db.prepare("UPDATE stores SET active=? WHERE seller_id=? AND approval_status='approved'").run(active,id); }); tx(); audit(req.user.id,'set_active','user',id,{active:!!active}); res.json({ok:true}); });
 
 app.get('/api/categories',(req,res)=>res.json({categories:db.prepare('SELECT * FROM categories WHERE active=1 ORDER BY name').all()}));
 
@@ -332,7 +385,7 @@ app.patch('/api/seller/orders/:id/status',auth,requireRole('seller'),(req,res)=>
 
 // Lacag-bixin automatic ah: provider-ka rasmiga ah ee Zaad/eDahab ayaa halkan callback ku soo diri kara.
 // App-ku ma sheeganayo in lacag la bixiyay ilaa callback saxiixan uu xaqiijiyo.
-app.post('/api/payments/webhook',(req,res)=>{
+app.post('/api/payments/webhook',rateLimit({windowMs:60*1000,max:120}),(req,res)=>{
   const secret=req.headers['x-payment-webhook-secret'];
   if(!secret||secret!==PAYMENT_WEBHOOK_SECRET)return res.status(401).json({error:'Webhook aan la oggolayn.'});
   const {orderNo,reference,status,amount,method}=req.body||{};
