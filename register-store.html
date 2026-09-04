@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="so"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diiwaangeli Bakhaar — Fududeeye Online</title>
+<style>
+body{margin:0;font-family:system-ui,sans-serif;background:#eff9f3;color:#18231d}.card{max-width:720px;margin:25px auto;background:#fff;padding:24px;border-radius:24px;box-shadow:0 15px 40px #0a5c3418}h1{color:#087a40}.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}label{display:block;font-weight:700;margin:12px 0 6px}input,select,textarea{width:100%;box-sizing:border-box;padding:13px;border:1px solid #d8e5dc;border-radius:12px;font-size:15px}button{width:100%;padding:14px;border:0;border-radius:12px;background:#087f40;color:#fff;font-weight:800;margin-top:16px}@media(max-width:600px){.grid{grid-template-columns:1fr}.card{margin:10px;padding:18px}}
+</style></head><body><main class="card">
+<h1>🏪 Diiwaangeli Bakhaar</h1><p>Buuxi xogta mulkiilaha, bakhaarka iyo location-ka.</p><p><a href="/" style="color:#087f40;font-weight:700;text-decoration:none">← Ku noqo Gelitaanka</a></p>
+<form id="f">
+<div class="grid"><div><label>Magaca mulkiilaha</label><input id="name" required></div><div><label>Gender-ka</label><select id="gender" required><option value="">Dooro</option><option>Nin</option><option>Dumar</option></select></div></div>
+<label>Lambarka mulkiilaha</label><input id="phone" inputmode="numeric" placeholder="63xxxxxxx" required>
+<label>Password</label><input id="pass" type="password" minlength="6" required>
+<label>Magaca bakhaarka</label><input id="store" required>
+<div class="grid"><div><label>Nooca bakhaarka</label><select id="type" required><option value="">Dooro</option><option>Raashin / Grocery</option><option>Khudaar iyo miro</option><option>Hilib</option><option>Cabitaanno</option><option>Farmashiye</option><option>Qalab guri</option><option>Bakhaar kale</option></select></div><div><label>Waxa lagu iibiyo</label><input id="products" placeholder="Bariis, baasto, saliid..." required></div></div>
+<div class="grid"><div><label>Magaalada</label><input id="city" required></div><div><label>Xaafadda</label><input id="neigh" required></div></div>
+<label>Cinwaanka / meesha</label><textarea id="address" required></textarea>
+<div class="grid"><div><label>Saacadaha shaqada</label><input id="hours" placeholder="8 AM - 10 PM"></div><div><label>Delivery</label><select id="delivery"><option value="0">Maya</option><option value="1">Haa</option></select></div></div>
+<label>Sharaxaad</label><textarea id="desc" placeholder="Wax ka qor bakhaarka..."></textarea>
+<button type="button" id="gps">📍 Qaado Location GPS</button><p id="msg"></p>
+<label><input type="checkbox" id="agree" required> Waxaan xaqiijinayaa xogta.</label>
+<button type="submit">🏪 Dir Codsiga</button>
+</form></main>
+<script>
+const API=location.origin;let lat=null,lng=null;
+document.getElementById('gps').onclick=()=>navigator.geolocation?.getCurrentPosition(p=>{lat=p.coords.latitude;lng=p.coords.longitude;document.getElementById('msg').textContent='✓ Location waa la helay'},()=>document.getElementById('msg').textContent='Location lama helin');
+document.getElementById('f').onsubmit=async e=>{e.preventDefault();if(!f.checkValidity()){f.reportValidity();return}try{const r=await fetch(API+'/api/register/seller',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:document.getElementById('name').value,phone:document.getElementById('phone').value,password:document.getElementById('pass').value,storeName:document.getElementById('store').value,ownerGender:document.getElementById('gender').value,businessType:document.getElementById('type').value,productsSold:document.getElementById('products').value,city:document.getElementById('city').value,neighborhood:document.getElementById('neigh').value,address:document.getElementById('address').value,openingHours:document.getElementById('hours').value,deliveryAvailable:document.getElementById('delivery').value==='1',description:document.getElementById('desc').value,lat,lng})});const d=await r.json();if(!r.ok)throw Error(d.error||'Qalad');document.getElementById('msg').textContent=d.message||'Codsiga waa la diray.';document.getElementById('f').reset()}catch(e){document.getElementById('msg').textContent=e.message}}</script>
+</body></html>

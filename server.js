@@ -69,6 +69,14 @@ for (const stmt of [
   "ALTER TABLE stores ADD COLUMN approval_decided_at TEXT",
   "ALTER TABLE stores ADD COLUMN rejection_reason TEXT"
 ]) { try { db.exec(stmt); } catch (_) {} }
+for (const stmt of [
+  "ALTER TABLE stores ADD COLUMN owner_gender TEXT",
+  "ALTER TABLE stores ADD COLUMN business_type TEXT",
+  "ALTER TABLE stores ADD COLUMN products_sold TEXT",
+  "ALTER TABLE stores ADD COLUMN opening_hours TEXT",
+  "ALTER TABLE stores ADD COLUMN delivery_available INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE stores ADD COLUMN description TEXT"
+]) { try { db.exec(stmt); } catch (_) {} }
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
@@ -104,6 +112,12 @@ CREATE TABLE IF NOT EXISTS stores (
   approval_deadline TEXT,
   approval_decided_at TEXT,
   rejection_reason TEXT,
+  owner_gender TEXT,
+  business_type TEXT,
+  products_sold TEXT,
+  opening_hours TEXT,
+  delivery_available INTEGER NOT NULL DEFAULT 0,
+  description TEXT,
   FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS categories (
@@ -230,7 +244,10 @@ app.post('/api/login',rateLimit({windowMs:15*60*1000,max:20}),(req,res)=>{
   if(u.role==='seller' && store?.approval_status==='expired') return res.status(403).json({error:'Codsiga bakhaarkaaga 24-ka saac wuu ka dhacay. Fadlan la xiriir Maamulka.'});
   if(!u.active) return res.status(401).json({error:'Account-kan hadda ma shaqaynayo.'});
   const safe={id:u.id,name:u.name,phone:u.phone,role:u.role,city:u.city||'',neighborhood:u.neighborhood||'',dob:u.dob||'',gender:u.gender||'',lat:u.lat,lng:u.lng,store};
-  res.json({token:sign(u),user:safe});
+  // The server decides the account type from the registered phone number.
+  // Sellers are explicitly routed to the seller/store dashboard; customers to the customer dashboard.
+  const redirectTo = u.role==='seller' ? 'seller' : u.role==='admin' ? 'admin' : 'customer';
+  res.json({token:sign(u),user:safe,redirectTo});
 });
 
 app.post('/api/register/customer',rateLimit({windowMs:60*60*1000,max:10}),(req,res)=>{
@@ -259,18 +276,34 @@ app.get('/api/me',auth,(req,res)=>{
 });
 
 app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res)=>{
-  const {name,phone,password,storeName,city,neighborhood,address,lat,lng}=req.body||{}; const p=normalizePhone(phone);
-  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood) return res.status(400).json({error:'Fadlan buuxi xogta iibiyaha iyo bakhaarka.'});
+  const {
+    name,phone,password,storeName,ownerGender,city,neighborhood,address,
+    lat,lng,businessType,productsSold,openingHours,deliveryAvailable,description
+  }=req.body||{};
+  const p=normalizePhone(phone);
+  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood||!ownerGender||!businessType||!productsSold)
+    return res.status(400).json({error:'Fadlan buuxi magaca mulkiilaha, telefoonka, password-ka, magaca bakhaarka, gender-ka, nooca bakhaarka, waxa lagu iibiyo, magaalada iyo xaafadda.'});
   if(db.prepare('SELECT id FROM users WHERE phone=?').get(p)) return res.status(409).json({error:'Lambarkan hore ayaa account loogu sameeyay.'});
   const tx=db.transaction(()=>{
     const hash=bcrypt.hashSync(password,12);
-    const u=db.prepare("INSERT INTO users(name,phone,password_hash,role,city,neighborhood,lat,lng,active) VALUES(?,?,?,?,?,?,?,?,0)").run(name.trim(),p,hash,'seller',city,neighborhood,lat||null,lng||null);
+    const u=db.prepare("INSERT INTO users(name,phone,password_hash,role,city,neighborhood,gender,lat,lng,active) VALUES(?,?,?,?,?,?,?,?,?,0)")
+      .run(name.trim(),p,hash,'seller',city,neighborhood,ownerGender,lat||null,lng||null);
     const requestedAt=new Date(); const deadline=new Date(requestedAt.getTime()+24*60*60*1000).toISOString();
-    const st=db.prepare("INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status,approval_requested_at,approval_deadline) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?)").run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null,requestedAt.toISOString(),deadline);
+    const st=db.prepare(`INSERT INTO stores(
+      seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status,
+      approval_requested_at,approval_deadline,owner_gender,business_type,products_sold,
+      opening_hours,delivery_available,description
+    ) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?,?,?,?,?,?,?)`).run(
+      u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null,
+      requestedAt.toISOString(),deadline,ownerGender,businessType,productsSold,
+      openingHours||'',deliveryAvailable?1:0,description||''
+    );
     return {userId:u.lastInsertRowid,storeId:st.lastInsertRowid};
   });
-  const out=tx(); audit(null,'seller_application','store',out.storeId,{userId:out.userId,status:'pending'});
-  res.json({ok:true,pending:true,message:'Waad ku guulaysatey inaad diwaangaliso bakhaarkaaga fadlan sug inta la soo aqblayo foomkaaga ugu badnaan 24hours mahadsanid.'});
+  const out=tx(); audit(null,'seller_application','store',out.storeId,{
+    userId:out.userId,status:'pending',businessType,productsSold,ownerGender
+  });
+  res.json({ok:true,pending:true,message:'Waad ku guulaysatey inaad diwaangaliso bakhaarkaaga. Fadlan sug inta Maamulka uu ansixinayo, ugu badnaan 24 saac.'});
 });
 
 app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
@@ -415,5 +448,7 @@ app.patch('/api/admin/products/:id',auth,requireRole('admin'),(req,res)=>{const 
 
 app.get('/health',(req,res)=>res.json({ok:true,service:'Fududeeye Online'}));
 app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'index.html')));
+app.get('/register-store',(req,res)=>res.sendFile(path.join(__dirname,'register-store.html')));
+app.get('/forgot-password',(req,res)=>res.sendFile(path.join(__dirname,'forgot-password.html')));
 app.use(express.static(__dirname));
 app.listen(PORT,()=>console.log(`Fududeeye server running on http://localhost:${PORT}`));

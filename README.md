@@ -30,3 +30,10 @@ The current app still uses SQLite. For a high-traffic production deployment, mig
 
 ## Payments
 Real Zaad/eDahab automatic payment verification is not included without an official provider API/webhook. Do not use fake SMS/OTP or scraping.
+
+
+Login redesign: the login section now has a polished green/white responsive layout with Forgot Password, Diiwaangeli Bakhaar, and quick-access buttons.
+
+
+## Store registration
+Seller registration now collects owner name/phone/password/gender, store name/type, products sold, city, neighborhood, address, GPS location, opening hours, delivery availability, and description. The submitted application remains pending for admin approval.
