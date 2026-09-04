@@ -28,6 +28,8 @@ const db = new Database(path.join(dataDir, 'fududeeye.db'));
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+try { db.exec("ALTER TABLE stores ADD COLUMN approval_status TEXT NOT NULL DEFAULT 'approved'"); } catch (_) {}
+
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -57,6 +59,7 @@ CREATE TABLE IF NOT EXISTS stores (
   lng REAL,
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  approval_status TEXT NOT NULL DEFAULT 'approved',
   FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS categories (
@@ -169,8 +172,11 @@ function orderNo(){ return 'FO-' + new Date().toISOString().slice(0,10).replace(
 app.post('/api/login',(req,res)=>{
   const p=normalizePhone(req.body?.phone); const password=String(req.body?.password||'');
   const u=db.prepare('SELECT * FROM users WHERE phone=?').get(p || req.body?.phone);
-  if(!u || !u.active || !bcrypt.compareSync(password,u.password_hash)) return res.status(401).json({error:'Lambarka ama furaha sirta ah waa khalad.'});
+  if(!u || !bcrypt.compareSync(password,u.password_hash)) return res.status(401).json({error:'Lambarka ama furaha sirta ah waa khalad.'});
   const store=u.role==='seller' ? db.prepare('SELECT * FROM stores WHERE seller_id=?').get(u.id) : null;
+  if(u.role==='seller' && store?.approval_status==='pending') return res.status(403).json({error:'Codsiga bakhaarkaaga wali waa la sugayaa. Fadlan sug inta Admin-ku ansixinayo.'});
+  if(u.role==='seller' && store?.approval_status==='rejected') return res.status(403).json({error:'Codsiga bakhaarkaaga waa la diiday. Fadlan la xiriir Maamulka.'});
+  if(!u.active) return res.status(401).json({error:'Account-kan hadda ma shaqaynayo.'});
   const safe={id:u.id,name:u.name,phone:u.phone,role:u.role,city:u.city||'',neighborhood:u.neighborhood||'',dob:u.dob||'',gender:u.gender||'',lat:u.lat,lng:u.lng,store};
   res.json({token:sign(u),user:safe});
 });
@@ -200,6 +206,20 @@ app.get('/api/me',auth,(req,res)=>{
   res.json({user:{...u,store}});
 });
 
+app.post('/api/register/seller',(req,res)=>{
+  const {name,phone,password,storeName,city,neighborhood,address,lat,lng}=req.body||{}; const p=normalizePhone(phone);
+  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood) return res.status(400).json({error:'Fadlan buuxi xogta iibiyaha iyo bakhaarka.'});
+  if(db.prepare('SELECT id FROM users WHERE phone=?').get(p)) return res.status(409).json({error:'Lambarkan hore ayaa account loogu sameeyay.'});
+  const tx=db.transaction(()=>{
+    const hash=bcrypt.hashSync(password,12);
+    const u=db.prepare("INSERT INTO users(name,phone,password_hash,role,city,neighborhood,lat,lng,active) VALUES(?,?,?,?,?,?,?,?,0)").run(name.trim(),p,hash,'seller',city,neighborhood,lat||null,lng||null);
+    const st=db.prepare("INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status) VALUES(?,?,?,?,?,?,?,?,0,'pending')").run(u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null);
+    return {userId:u.lastInsertRowid,storeId:st.lastInsertRowid};
+  });
+  const out=tx(); audit(null,'seller_application','store',out.storeId,{userId:out.userId,status:'pending'});
+  res.json({ok:true,pending:true,message:'Waad ku guulaysatey inaad diwaangaliso bakhaarkaaga fadlan sug inta la soo aqblayo foomkaaga ugu badnaan 24hours mahadsanid.'});
+});
+
 app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
   const {name,phone,password,storeName,city,neighborhood,address,lat,lng}=req.body||{}; const p=normalizePhone(phone);
   if(!name||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood) return res.status(400).json({error:'Fadlan buuxi xogta iibiyaha iyo bakhaarka.'});
@@ -215,9 +235,22 @@ app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
 
 app.get('/api/admin/customers',auth,requireRole('admin'),(req,res)=>{ const rows=db.prepare("SELECT id,name,phone,city,neighborhood,active,created_at FROM users WHERE role='customer' ORDER BY id DESC").all(); res.json({customers:rows}); });
 app.get('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
-  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng
+  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng,s.approval_status
     FROM users u LEFT JOIN stores s ON s.seller_id=u.id WHERE u.role='seller' ORDER BY u.id DESC`).all(); res.json({sellers:rows});
 });
+app.patch('/api/admin/sellers/:id/approval',auth,requireRole('admin'),(req,res)=>{
+  const id=Number(req.params.id); const status=String(req.body.status||'');
+  if(!['approved','rejected','pending'].includes(status)) return res.status(400).json({error:'Xaalad ansixin aan sax ahayn.'});
+  const seller=db.prepare("SELECT u.id,s.id store_id FROM users u JOIN stores s ON s.seller_id=u.id WHERE u.id=? AND u.role='seller'").get(id);
+  if(!seller) return res.status(404).json({error:'Iibiyaha lama helin.'});
+  const active=status==='approved'?1:0;
+  const tx=db.transaction(()=>{
+    db.prepare('UPDATE users SET active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(active,id);
+    db.prepare('UPDATE stores SET active=?,approval_status=? WHERE seller_id=?').run(active,status,id);
+  }); tx(); audit(req.user.id,'seller_approval','store',seller.store_id,{status});
+  res.json({ok:true,status});
+});
+
 app.patch('/api/admin/users/:id/active',auth,requireRole('admin'),(req,res)=>{ const id=Number(req.params.id); db.prepare('UPDATE users SET active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(req.body.active?1:0,id); audit(req.user.id,'set_active','user',id,{active:!!req.body.active}); res.json({ok:true}); });
 
 app.get('/api/categories',(req,res)=>res.json({categories:db.prepare('SELECT * FROM categories WHERE active=1 ORDER BY name').all()}));
