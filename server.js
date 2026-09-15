@@ -15,7 +15,7 @@ app.use((req,res,next)=>{
   if(req.method==='OPTIONS') return res.sendStatus(204);
   next();
 });
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: '3mb' }));
 // Allow the mobile/browser frontend to call the Render API even when the
 // HTML is opened from a content:// or file:// URI. Authenticated endpoints
 // still require the normal Bearer token.
@@ -75,7 +75,11 @@ for (const stmt of [
   "ALTER TABLE stores ADD COLUMN products_sold TEXT",
   "ALTER TABLE stores ADD COLUMN opening_hours TEXT",
   "ALTER TABLE stores ADD COLUMN delivery_available INTEGER NOT NULL DEFAULT 0",
-  "ALTER TABLE stores ADD COLUMN description TEXT"
+  "ALTER TABLE stores ADD COLUMN description TEXT",
+  "ALTER TABLE stores ADD COLUMN business_buyer_phone TEXT",
+  "ALTER TABLE stores ADD COLUMN store_size TEXT",
+  "ALTER TABLE stores ADD COLUMN owner_photo TEXT",
+  "ALTER TABLE stores ADD COLUMN id_photo TEXT"
 ]) { try { db.exec(stmt); } catch (_) {} }
 
 db.exec(`
@@ -118,6 +122,10 @@ CREATE TABLE IF NOT EXISTS stores (
   opening_hours TEXT,
   delivery_available INTEGER NOT NULL DEFAULT 0,
   description TEXT,
+  business_buyer_phone TEXT,
+  store_size TEXT,
+  owner_photo TEXT,
+  id_photo TEXT,
   FOREIGN KEY(seller_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE TABLE IF NOT EXISTS categories (
@@ -206,6 +214,54 @@ CREATE INDEX IF NOT EXISTS idx_orders_seller ON orders(seller_id);
 const defaultCategories = ['Bariis','Baasto','Saliid','Bur','Sonkor','Caano','Cabitaan','Khudaar','Hilib','Qalab kale'];
 for (const c of defaultCategories) db.prepare('INSERT OR IGNORE INTO categories(name) VALUES(?)').run(c);
 
+// Demo bakhaar + raashin: created once so the customer app has sample data to preview.
+// This is intentionally a normal seller account and can be removed/edited from Admin.
+const DEMO_SELLER_PHONE = '637000000';
+const demoSellerPassword = 'Demo1234';
+const demoSellerName = 'Bakhaar Tusaale';
+const demoStoreName = 'Fududeeye Raashin';
+
+// Demo data is idempotent: it is created/filled even when an older database already exists.
+const demoSellerHash = bcrypt.hashSync(demoSellerPassword, 12);
+const demoTx = db.transaction(() => {
+  let seller = db.prepare('SELECT id FROM users WHERE phone=?').get(DEMO_SELLER_PHONE);
+  if (!seller) {
+    const u = db.prepare(`INSERT INTO users(name,phone,password_hash,role,city,neighborhood,active) VALUES(?,?,?,?,?,?,1)`)
+      .run(demoSellerName, DEMO_SELLER_PHONE, demoSellerHash, 'seller', 'Hargeysa', '26 June');
+    seller = { id: u.lastInsertRowid };
+  } else {
+    db.prepare("UPDATE users SET role='seller', active=1, city='Hargeysa', neighborhood='26 June' WHERE id=?").run(seller.id);
+  }
+
+  let store = db.prepare('SELECT id FROM stores WHERE seller_id=? ORDER BY id LIMIT 1').get(seller.id);
+  if (!store) {
+    const st = db.prepare(`INSERT INTO stores(seller_id,name,phone,city,neighborhood,address,active,approval_status,approval_decided_at,business_type,products_sold,opening_hours,delivery_available,description)
+      VALUES(?,?,?,?,?,?,?,?,CURRENT_TIMESTAMP,?,?,?,?,?)`)
+      .run(seller.id, demoStoreName, DEMO_SELLER_PHONE, 'Hargeysa', '26 June', 'Agagaarka 26 June', 1, 'approved', 'Raashin', 'Raashin kala duwan', '8:00 AM - 10:00 PM', 1, 'Bakhaar tusaale ah oo loogu talagalay in lagu tijaabiyo Fududeeye.');
+    store = { id: st.lastInsertRowid };
+  } else {
+    db.prepare(`UPDATE stores SET name=?,phone=?,city=?,neighborhood=?,address=?,active=1,approval_status='approved',business_type=?,products_sold=?,opening_hours=?,delivery_available=1,description=? WHERE id=?`)
+      .run(demoStoreName, DEMO_SELLER_PHONE, 'Hargeysa', '26 June', 'Agagaarka 26 June', 'Raashin', 'Raashin kala duwan', '8:00 AM - 10:00 PM', 'Bakhaar tusaale ah oo loogu talagalay in lagu tijaabiyo Fududeeye.', store.id);
+  }
+
+  const products = [
+    ['Bariis Basmati 25kg','Bariis tayo leh',22,30,'Bac','Raashin'],
+    ['Bur 25kg','Bur cad oo tayo leh',16,25,'Bac','Raashin'],
+    ['Sonkor 25kg','Sonkor cad',18,20,'Bac','Raashin'],
+    ['Saliid 5L','Saliid cunto',9,35,'Dhalo','Raashin'],
+    ['Baasto 500g','Baasto',0.8,60,'Xirmo','Raashin'],
+    ['Caano 1L','Caano',1.5,40,'Dhalo','Raashin'],
+    ['Digir 1kg','Digir',2.5,45,'Kg','Raashin'],
+    ['Timir 1kg','Timir',4,25,'Kg','Raashin']
+  ];
+  const count = db.prepare('SELECT COUNT(*) AS c FROM products WHERE store_id=?').get(store.id).c;
+  if (!count) {
+    const ins = db.prepare(`INSERT INTO products(seller_id,store_id,name,description,price,stock,unit,category,active) VALUES(?,?,?,?,?,?,?,?,1)`);
+    for (const x of products) ins.run(seller.id, store.id, ...x);
+  }
+});
+demoTx();
+
 const adminExists = db.prepare('SELECT id FROM users WHERE phone=?').get(ADMIN_USER);
 if (!adminExists) {
   const hash = bcrypt.hashSync(ADMIN_PASSWORD, 12);
@@ -278,11 +334,16 @@ app.get('/api/me',auth,(req,res)=>{
 app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res)=>{
   const {
     name,phone,password,storeName,ownerGender,city,neighborhood,address,
-    lat,lng,businessType,productsSold,openingHours,deliveryAvailable,description
+    lat,lng,businessType,productsSold,openingHours,deliveryAvailable,description,
+    businessBuyerPhone,storeSize,ownerPhoto,idOrPassportPhoto
   }=req.body||{};
   const p=normalizePhone(phone);
-  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||!city||!neighborhood||!ownerGender||!businessType||!productsSold)
-    return res.status(400).json({error:'Fadlan buuxi magaca mulkiilaha, telefoonka, password-ka, magaca bakhaarka, gender-ka, nooca bakhaarka, waxa lagu iibiyo, magaalada iyo xaafadda.'});
+  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||storeName.trim().length<2||!city||!neighborhood||!ownerGender||!businessType||!productsSold||!storeSize||!businessBuyerPhone)
+    return res.status(400).json({error:'Fadlan buuxi dhammaan xogta khasabka ah, oo ay ku jirto lambarka ku iibsada meherada.'});
+  if(normalizePhone(businessBuyerPhone).length!==9) return res.status(400).json({error:'Lambarka ku iibsada meherada ma saxna.'});
+  for (const [label,value] of [['ownerPhoto',ownerPhoto],['idOrPassportPhoto',idOrPassportPhoto]]) {
+    if(value && (typeof value!=='string' || value.length>900000 || !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(value))) return res.status(400).json({error:`${label} sawir ahaan sax uma aha ama aad buu u weyn yahay.`});
+  }
   if(db.prepare('SELECT id FROM users WHERE phone=?').get(p)) return res.status(409).json({error:'Lambarkan hore ayaa account loogu sameeyay.'});
   const tx=db.transaction(()=>{
     const hash=bcrypt.hashSync(password,12);
@@ -292,11 +353,11 @@ app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res
     const st=db.prepare(`INSERT INTO stores(
       seller_id,name,phone,city,neighborhood,address,lat,lng,active,approval_status,
       approval_requested_at,approval_deadline,owner_gender,business_type,products_sold,
-      opening_hours,delivery_available,description
-    ) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?,?,?,?,?,?,?)`).run(
+      opening_hours,delivery_available,description,business_buyer_phone,store_size,owner_photo,id_photo
+    ) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null,
       requestedAt.toISOString(),deadline,ownerGender,businessType,productsSold,
-      openingHours||'',deliveryAvailable?1:0,description||''
+      openingHours||'',deliveryAvailable?1:0,description||'',businessBuyerPhone?normalizePhone(businessBuyerPhone):'',storeSize,ownerPhoto||'',idOrPassportPhoto||''
     );
     return {userId:u.lastInsertRowid,storeId:st.lastInsertRowid};
   });
@@ -321,7 +382,7 @@ app.post('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
 
 app.get('/api/admin/customers',auth,requireRole('admin'),(req,res)=>{ const rows=db.prepare("SELECT id,name,phone,city,neighborhood,active,created_at FROM users WHERE role='customer' ORDER BY id DESC").all(); res.json({customers:rows}); });
 app.get('/api/admin/sellers',auth,requireRole('admin'),(req,res)=>{
-  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng,s.approval_status,s.approval_requested_at,s.approval_deadline,s.approval_decided_at,s.rejection_reason
+  const rows=db.prepare(`SELECT u.id,u.name,u.phone,u.city,u.neighborhood,u.active,u.created_at,s.id store_id,s.name store_name,s.address,s.lat,s.lng,s.approval_status,s.approval_requested_at,s.approval_deadline,s.approval_decided_at,s.rejection_reason,s.business_buyer_phone,s.store_size,s.owner_photo,s.id_photo
     FROM users u LEFT JOIN stores s ON s.seller_id=u.id WHERE u.role='seller' ORDER BY u.id DESC`).all(); res.json({sellers:rows});
 });
 app.patch('/api/admin/sellers/:id/approval',auth,requireRole('admin'),(req,res)=>{
@@ -354,8 +415,11 @@ app.get('/api/products',(req,res)=>{
 app.get('/api/seller/products',auth,requireRole('seller'),(req,res)=>res.json({products:db.prepare('SELECT * FROM products WHERE seller_id=? ORDER BY id DESC').all(req.user.id)}));
 app.post('/api/seller/products',auth,requireRole('seller'),(req,res)=>{
   const {name,description,price,stock,unit,image,category}=req.body||{}; if(!name||Number(price)<0||Number.isNaN(Number(price))) return res.status(400).json({error:'Magaca iyo qiimaha alaabta waa qasab.'});
-  const store=db.prepare('SELECT id FROM stores WHERE seller_id=?').get(req.user.id); if(!store) return res.status(400).json({error:'Bakhaarka iibiyaha lama helin.'});
-  const info=db.prepare('INSERT INTO products(seller_id,store_id,name,description,price,stock,unit,image,category) VALUES(?,?,?,?,?,?,?,?,?)').run(req.user.id,store.id,name.trim(),description||'',Number(price),Math.max(0,Number(stock||0)),unit||'',image||'',category||''); audit(req.user.id,'create','product',info.lastInsertRowid,{name}); res.json({id:info.lastInsertRowid});
+  const cleanName=String(name||'').trim(); const numericPrice=Number(price); const numericStock=Number(stock||0);
+  if(!cleanName||cleanName.length>150||!Number.isFinite(numericPrice)||numericPrice<0||!Number.isInteger(numericStock)||numericStock<0) return res.status(400).json({error:'Magaca, qiimaha ama stock-ga alaabta ma saxna.'});
+  if(image && (typeof image!=='string'||image.length>700000)) return res.status(400).json({error:'Sawirka alaabtu aad buu u weyn yahay.'});
+  const store=db.prepare('SELECT id FROM stores WHERE seller_id=? AND active=1 AND approval_status=\'approved\'').get(req.user.id); if(!store) return res.status(400).json({error:'Bakhaarka iibiyaha lama heli karo ama wali lama ansixin.'});
+  const info=db.prepare('INSERT INTO products(seller_id,store_id,name,description,price,stock,unit,image,category) VALUES(?,?,?,?,?,?,?,?,?)').run(req.user.id,store.id,cleanName,String(description||'').slice(0,1000),numericPrice,numericStock,String(unit||'').slice(0,30),image||'',String(category||'').slice(0,80)); audit(req.user.id,'create','product',info.lastInsertRowid,{name:cleanName}); res.json({id:info.lastInsertRowid});
 });
 app.patch('/api/seller/products/:id',auth,requireRole('seller'),(req,res)=>{
   const id=Number(req.params.id); const old=db.prepare('SELECT * FROM products WHERE id=? AND seller_id=?').get(id,req.user.id); if(!old)return res.status(404).json({error:'Alaabtaas adiga ma lihid.'});
@@ -386,7 +450,7 @@ app.post('/api/orders',auth,requireRole('customer'),(req,res)=>{
     }
     const total=subtotal+Number(deliveryFee||0); const no=orderNo();
     const info=db.prepare(`INSERT INTO orders(order_no,customer_id,seller_id,store_id,subtotal,delivery_fee,total,payment_method,payment_reference,payment_status,status,customer_name,customer_phone,city,neighborhood,address,lat,lng) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(no,customer.id,store.seller_id,store.id,subtotal,Number(deliveryFee||0),total,paymentMethod||'mobile-money',paymentReference||'', 'processing','processing',customer.name,customer.phone,city||customer.city,neighborhood||customer.neighborhood,address||'',typeof lat==='number'?lat:customer.lat,typeof lng==='number'?lng:customer.lng);
-    for(const l of lines){ db.prepare('INSERT INTO order_items(order_id,product_id,name,price,quantity,line_total) VALUES(?,?,?,?,?,?)').run(info.lastInsertRowid,l.p.id,l.p.name,l.p.price,l.q,l.line); db.prepare('UPDATE products SET stock=stock-? WHERE id=?').run(l.q,l.p.id); }
+    for(const l of lines){ db.prepare('INSERT INTO order_items(order_id,product_id,name,price,quantity,line_total) VALUES(?,?,?,?,?,?)').run(info.lastInsertRowid,l.p.id,l.p.name,l.p.price,l.q,l.line); const upd=db.prepare('UPDATE products SET stock=stock-?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND stock>=?').run(l.q,l.p.id,l.q); if(!upd.changes) throw new Error(`Stock-ga ${l.p.name} kuma filna.`); }
     db.prepare('INSERT INTO payments(order_id,amount,method,reference,status) VALUES(?,?,?,?,?)').run(info.lastInsertRowid,total,paymentMethod||'mobile-money',paymentReference||'','processing');
     return {id:info.lastInsertRowid,orderNo:no,total,storePhone:store.phone};
   });
@@ -412,6 +476,8 @@ app.patch('/api/seller/orders/:id/status',auth,requireRole('seller'),(req,res)=>
       for(const item of db.prepare('SELECT product_id,quantity FROM order_items WHERE order_id=?').all(id)) db.prepare('UPDATE products SET stock=stock+? WHERE id=?').run(item.quantity,item.product_id);
     }); tx(); audit(req.user.id,'status','order',id,{status}); return res.json({ok:true});
   }
+  const transitions={processing:['accepted','rejected'],accepted:['ready','rejected'],ready:['delivering','rejected'],delivering:['delivered']};
+  if(status!=='rejected' && status!=='processing' && !(transitions[o.status]||[]).includes(status)) return res.status(409).json({error:`Dalabka ${o.status} looma beddeli karo ${status}.`});
   db.prepare('UPDATE orders SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND seller_id=?').run(status,id,req.user.id);
   audit(req.user.id,'status','order',id,{status}); res.json({ok:true});
 });
@@ -447,8 +513,10 @@ app.get('/api/admin/products',auth,requireRole('admin'),(req,res)=>res.json({pro
 app.patch('/api/admin/products/:id',auth,requireRole('admin'),(req,res)=>{const id=Number(req.params.id);const p=db.prepare('SELECT * FROM products WHERE id=?').get(id);if(!p)return res.status(404).json({error:'Alaabta lama helin.'});const next={...p,...req.body};db.prepare('UPDATE products SET name=?,description=?,price=?,stock=?,unit=?,image=?,category=?,active=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').run(String(next.name),next.description||'',Number(next.price),Math.max(0,Number(next.stock||0)),next.unit||'',next.image||'',next.category||'',next.active===false?0:1,id);audit(req.user.id,'admin_update','product',id,{before:p,after:next});res.json({ok:true});});
 
 app.get('/health',(req,res)=>res.json({ok:true,service:'Fududeeye Online'}));
-app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'index.html')));
-app.get('/register-store',(req,res)=>res.sendFile(path.join(__dirname,'register-store.html')));
+app.use((err,req,res,next)=>{ console.error(err); if(res.headersSent)return next(err); res.status(500).json({error:'Server-ka cilad ayaa ka dhacday. Fadlan mar kale isku day.'}); });
+
+app.get('/admin',(req,res)=>res.sendFile(path.join(__dirname,'admin.html')));
+app.get(['/register-store','/register-store/'],(req,res)=>res.sendFile(path.join(__dirname,'register-store.html')));
 app.get('/forgot-password',(req,res)=>res.sendFile(path.join(__dirname,'forgot-password.html')));
 app.use(express.static(__dirname));
 app.listen(PORT,()=>console.log(`Fududeeye server running on http://localhost:${PORT}`));
