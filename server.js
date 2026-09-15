@@ -338,9 +338,10 @@ app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res
     businessBuyerPhone,storeSize,ownerPhoto,idOrPassportPhoto
   }=req.body||{};
   const p=normalizePhone(phone);
-  if(!name||name.trim().length<2||p.length!==9||!password||password.length<6||!storeName||storeName.trim().length<2||!city||!neighborhood||!ownerGender||!businessType||!productsSold||!storeSize||!businessBuyerPhone)
+  if(!name||name.trim().length<2||!/^6[35]\d{7}$/.test(p)||!password||password.length<6||!storeName||storeName.trim().length<2||!city||!neighborhood||!ownerGender||!businessType||!productsSold||!storeSize||!businessBuyerPhone)
     return res.status(400).json({error:'Fadlan buuxi dhammaan xogta khasabka ah, oo ay ku jirto lambarka ku iibsada meherada.'});
-  if(normalizePhone(businessBuyerPhone).length!==9) return res.status(400).json({error:'Lambarka ku iibsada meherada ma saxna.'});
+  if(!/^6[35]\d{7}$/.test(p)) return res.status(400).json({error:'Lambarka mulkiilaha waa inuu noqdaa 9 lambar oo ka bilaabma 63 ama 65.'});
+  if(!/^\d{1,6}$/.test(String(businessBuyerPhone).trim())) return res.status(400).json({error:'Lambarka ku iibsada meherada waa inuu noqdaa ugu badnaan 6 lambar.'});
   for (const [label,value] of [['ownerPhoto',ownerPhoto],['idOrPassportPhoto',idOrPassportPhoto]]) {
     if(value && (typeof value!=='string' || value.length>900000 || !/^data:image\/(jpeg|jpg|png|webp);base64,/i.test(value))) return res.status(400).json({error:`${label} sawir ahaan sax uma aha ama aad buu u weyn yahay.`});
   }
@@ -357,7 +358,7 @@ app.post('/api/register/seller',rateLimit({windowMs:60*60*1000,max:10}),(req,res
     ) VALUES(?,?,?,?,?,?,?,?,0,'pending',?,?,?,?,?,?,?,?,?,?,?,?)`).run(
       u.lastInsertRowid,storeName.trim(),p,city,neighborhood,address||'',lat||null,lng||null,
       requestedAt.toISOString(),deadline,ownerGender,businessType,productsSold,
-      openingHours||'',deliveryAvailable?1:0,description||'',businessBuyerPhone?normalizePhone(businessBuyerPhone):'',storeSize,ownerPhoto||'',idOrPassportPhoto||''
+      openingHours||'',deliveryAvailable?1:0,description||'',String(businessBuyerPhone||'').trim(),storeSize,ownerPhoto||'',idOrPassportPhoto||''
     );
     return {userId:u.lastInsertRowid,storeId:st.lastInsertRowid};
   });

@@ -293,8 +293,8 @@
   <div><label for="srGender">Gender-ka</label><select id="srGender" class="field" required><option value="">Dooro gender-ka</option><option value="Nin">Nin</option><option value="Dumar">Dumar</option></select></div>
 </div>
 <label for="srPhone">Lambarka telefoonka mulkiilaha</label>
-<input id="srPhone" class="field" inputmode="numeric" autocomplete="tel" maxlength="9" placeholder="63xxxxxxx" required>
-<div class="hint">Geli 9-ka lambar ee telefoonka, tusaale 63xxxxxxx.</div>
+<input id="srPhone" class="field" inputmode="numeric" autocomplete="tel" maxlength="9" pattern="6[35][0-9]{7}" placeholder="63xxxxxxx" required>
+<div class="hint">Geli 9-ka lambar ee telefoonka mulkiilaha, waana inuu ka bilaabmaa 63 ama 65. Tusaale: 63xxxxxxx.</div>
 <label for="srPass">Password-ka</label>
 <input id="srPass" class="field" type="password" autocomplete="new-password" minlength="6" placeholder="Ugu yaraan 6 xaraf" required>
 
@@ -302,7 +302,7 @@
 <label for="srStore">Magaca bakhaarka</label>
 <input id="srStore" class="field" placeholder="Tusaale: Bakhaarka Ruush" required>
 <label for="srBusinessBuyerPhone">Lambarka ku iibsada meherada</label>
-<input id="srBusinessBuyerPhone" class="field" inputmode="numeric" autocomplete="tel" maxlength="9" placeholder="63xxxxxxx" required>
+<input id="srBusinessBuyerPhone" class="field" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="Ugu badnaan 6 lambar" required>
 <div class="hint">Geli lambarka qofka ku iibsada alaabta/meherada.</div>
 <div class="login-two">
   <div><label for="srType">Nooca bakhaarka</label>
@@ -327,7 +327,7 @@
   <div><label for="srDelivery">Gaarsiin (Delivery)</label><select id="srDelivery" class="field"><option value="0">Maya</option><option value="1">Haa</option></select></div>
 </div>
 <button type="button" id="srLoc" class="secondary" style="margin-top:6px">📍 Qaado location-ka bakhaarka</button>
-<div id="srGpsHint" class="hint">GPS wuxuu ka caawinayaa macaamiisha inay si sax ah u helaan bakhaarka.</div>
+<div id="srGpsHint" class="hint">GPS waa ikhtiyaari; haddii uusan helin, codsiga weli waa la diri karaa.</div>
 <label for="srDescription">Sharaxaad kooban</label>
 <textarea id="srDescription" class="field" rows="3" placeholder="Wax ka qor bakhaarka, adeegyada iyo waxa aad bixiso..."></textarea>
 
@@ -364,7 +364,8 @@ function cityOptions(selected=''){return '<option value="">Dooro magaalada</opti
 $('rCity').innerHTML=cityOptions();$('rCity').onchange=()=>{$('rNeigh').innerHTML='<option value="">Dooro xaafadda</option>'+(CITIES[$('rCity').value]||[]).map(n=>`<option>${n}</option>`).join('')};$('srCity').innerHTML=cityOptions();
 $('srCity').onchange=()=>{$('srNeigh').innerHTML='<option value="">Dooro xaafadda</option>'+(CITIES[$('srCity').value]||[]).map(n=>`<option>${n}</option>`).join('')};
 $('srPhone').oninput=e=>e.target.value=e.target.value.replace(/\D/g,'').slice(0,9);
-$('srBusinessBuyerPhone').oninput=e=>e.target.value=e.target.value.replace(/\D/g,'').slice(0,9);
+$('srPhone').onblur=e=>{const v=e.target.value.trim();if(v&&!/^6[35]\d{7}$/.test(v))e.target.setCustomValidity('Lambarka mulkiilaha waa inuu noqdaa 9 lambar oo ka bilaabma 63 ama 65.');else e.target.setCustomValidity('')};
+$('srBusinessBuyerPhone').oninput=e=>e.target.value=e.target.value.replace(/\D/g,'').slice(0,6);
 $('srLoc').onclick=()=>{
   if(!navigator.geolocation){$('srGpsHint').innerHTML='<span class="err">Telefoonkaagu ma taageerayo GPS.</span>';return}
   $('srLoc').disabled=true;$('srLoc').textContent='📍 Location ayaa la raadinayaa...';
@@ -380,10 +381,32 @@ $('srLoc').onclick=()=>{
 $('sellerRegisterForm').onsubmit=async e=>{
   e.preventDefault();
   const form=e.currentTarget;
-  if(!form.checkValidity()){form.reportValidity();return}
+  const requiredFields=[
+    ['srName','Magaca oo buuxa'],['srGender','Gender-ka'],['srPhone','Lambarka telefoonka mulkiilaha'],
+    ['srPass','Password-ka'],['srStore','Magaca bakhaarka'],['srBusinessBuyerPhone','Lambarka ku iibsada meherada'],
+    ['srType','Nooca bakhaarka'],['srProducts','Waxa lagu iibiyo bakhaarka'],['srCity','Magaalada'],
+    ['srNeigh','Xaafadda'],['srAddress','Cinwaanka / meesha bakhaarka']
+  ];
+  for(const [id,label] of requiredFields){
+    const el=$(id);
+    if(!el || !String(el.value||'').trim()){
+      $('sellerRegMsg').innerHTML='<span class="err">Fadlan buuxi: '+label+'.</span>';
+      el?.focus(); return;
+    }
+  }
+  if(!$('srAgree').checked){
+    $('sellerRegMsg').innerHTML='<span class="err">Fadlan oggolow shuruudaha adigoo saxaya sanduuqa xaqiijinta.</span>';
+    $('srAgree').focus(); return;
+  }
   const phone=$('srPhone').value.trim();
-  if(!/^6[0-9]{8}$/.test(phone)){
-    $('sellerRegMsg').innerHTML='<span class="err">Lambarka telefoonka waa inuu noqdaa 9 lambar oo ka bilaabma 6.</span>';return
+  if(!/^6[35]\d{7}$/.test(phone)){
+    $('sellerRegMsg').innerHTML='<span class="err">Lambarka mulkiilaha waa inuu noqdaa 9 lambar oo ka bilaabma 63 ama 65.</span>';
+    $('srPhone').focus(); return;
+  }
+  const buyer=$('srBusinessBuyerPhone').value.trim();
+  if(!/^\d{1,6}$/.test(buyer)){
+    $('sellerRegMsg').innerHTML='<span class="err">Lambarka ku iibsada meherada waa inuu noqdaa 1 ilaa 6 lambar.</span>';
+    $('srBusinessBuyerPhone').focus(); return;
   }
   const btn=$('srSubmit');btn.disabled=true;btn.textContent='⏳ Codsiga waa la dirayaa...';
   $('sellerRegMsg').innerHTML='<span class="muted">Fadlan sug...</span>';
